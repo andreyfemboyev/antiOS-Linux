@@ -1,0 +1,66 @@
+name: Linux release build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install build and display dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev mesa-vulkan-drivers xvfb xauth xdotool openbox x11-utils ripgrep
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - run: cargo build --locked --release
+      - name: Verify same-seed PNG exports
+        run: |
+          install -d -m 700 "$RUNNER_TEMP/antios-runtime"
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/antios-runtime"
+          target/release/antios --render first.png --at-frame 1800 --size 640x400 --quality low
+          target/release/antios --render second.png --at-frame 1800 --size 640x400 --quality low
+          cmp first.png second.png
+      - name: Drive the native Linux window
+        run: |
+          install -d -m 700 "$RUNNER_TEMP/antios-runtime"
+          export XDG_RUNTIME_DIR="$RUNNER_TEMP/antios-runtime"
+          xvfb-run -a -s '-screen 0 1600x1000x24' bash -e -c '
+            openbox >"$RUNNER_TEMP/antios-wm.log" 2>&1 &
+            for attempt in {1..50}; do
+              if xprop -root _NET_SUPPORTING_WM_CHECK | rg -q "window id"; then break; fi
+              sleep .1
+            done
+            xprop -root _NET_SUPPORTING_WM_CHECK | rg -q "window id"
+            tests/linux-window.sh
+          '
+      - name: Package standalone executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(target/release/antios --version | awk '{print $2}')"
+          mkdir -p stage/assets
+          cp target/release/antios stage/
+          cp README.md LICENSE THIRD_PARTY_NOTICES.txt stage/
+          cp -r screenshots stage/
+          cp assets/*-OFL.txt assets/antios-mark.svg stage/assets/
+          rust_sysroot=$(rustc --print sysroot)
+          if command -v cygpath >/dev/null 2>&1; then rust_sysroot=$(cygpath -u "$rust_sysroot"); fi
+          cp "$rust_sysroot/share/doc/rust/COPYRIGHT-library.html" stage/Rust-standard-library-notice.html
+          tar -czf "antiOS-${version}-linux-x86_64.tar.gz" -C stage .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: antiOS-linux-x86_64
+          path: antiOS-*-linux-x86_64.tar.gz
+          if-no-files-found: error
